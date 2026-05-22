@@ -1,0 +1,142 @@
+# Festival Finder
+
+Festival Finder is a small web app for festival crowd coordination:
+
+- upload a band timetable with band, festival, stage, date, and time
+- open a band page for that set
+- let friends check in with a display name
+- store their GPS coordinates
+- upload a POV photo and a side photo so other people can see where they are watching
+
+The current implementation uses simple name-based check-ins for each band page. It does not include account passwords or private friend groups yet.
+
+## Tech stack
+
+- Python
+- Flask
+- SQLite
+- local file uploads for timetable files and crowd photos
+- OpenStreetMap and Apple Maps links for attendee locations
+
+## Run locally
+
+1. Create a virtual environment:
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+2. Install dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Start the app:
+
+   ```bash
+   python3 app.py
+   ```
+
+4. Open `http://127.0.0.1:5001`
+
+Uploads and the SQLite database are stored under `data/` by default.
+
+### Local HTTPS for iPhone testing
+
+You can run the local server over HTTPS:
+
+1. Generate a development certificate:
+
+   ```bash
+   ./scripts/generate_dev_cert.sh
+   ```
+
+   The script includes `localhost`, your Mac hostname, and your current LAN IP in the certificate when it can detect them.
+   If your LAN IP is not detected automatically, pass it explicitly:
+
+   ```bash
+   ./scripts/generate_dev_cert.sh 192.168.1.12
+   ```
+
+2. Start the app with local HTTPS enabled:
+
+   ```bash
+   LOCAL_HTTPS=1 python3 app.py
+   ```
+
+3. Open one of these URLs:
+
+   - `https://localhost:5001` on your Mac
+   - `https://Michels-MacBook-Pro.local:5001` on devices on the same network
+
+Important: the generated certificate is self-signed. For browser geolocation on iPhone, Safari must trust the certificate. If Safari still treats the page as insecure, use a Railway URL or another HTTPS tunnel with a publicly trusted certificate.
+
+### Map links
+
+No external map API key is required.
+
+Band pages link attendee coordinates to OpenStreetMap. The `Navigate` button uses Apple Maps for walking directions, and on iPhone it tries the native Maps app first before falling back to the web URL.
+
+Important for iPhone testing: Safari only allows browser geolocation on secure origins. That means:
+
+- `https://your-app.up.railway.app` should work
+- `http://192.168.x.x:5001` from your phone will be blocked
+- `LOCAL_HTTPS=1 python3 app.py` can work for local HTTPS, but the certificate must be trusted on the phone
+- Railway, Render, or an HTTPS tunnel is still the cleanest option for phone testing
+
+## Deploy with GitHub + Railway
+
+GitHub should hold the source code. Railway should run the server.
+
+1. Create a new GitHub repository and push this project to it.
+2. In Railway, choose **New Project** -> **Deploy from GitHub repo**.
+3. Select this repository.
+4. Railway will detect the checked-in [`railway.json`](railway.json) and use Gunicorn with the `/health` endpoint.
+5. In the service **Variables** tab, set `SECRET_KEY`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD`.
+6. Generate a public domain in the service **Settings** -> **Networking** section.
+7. Attach a volume to the service and mount it somewhere like `/data`.
+
+Railway automatically exposes the `RAILWAY_VOLUME_MOUNT_PATH` environment variable for attached volumes. This app now uses that mount path automatically for the SQLite database and uploads when `DATABASE_PATH` and `UPLOAD_ROOT` are not set explicitly.
+
+### Important Railway note
+
+This app stores uploads and SQLite data on disk. Railway deployments are ephemeral unless you attach a persistent volume.
+
+Without a volume, uploaded timetable files, POV photos, side photos, and the SQLite database will disappear after redeploys or restarts.
+
+The included [`.env.example`](.env.example) file helps Railway suggest the required variables during setup.
+
+If you prefer explicit paths instead of Railway's automatic volume detection, set:
+
+```bash
+DATABASE_PATH=/data/festival_finder.db
+UPLOAD_ROOT=/data/uploads
+```
+
+### Render
+
+The existing [`render.yaml`](render.yaml) is still usable if you decide to deploy on Render instead.
+
+### Admin login
+
+The public crowd check-in flow stays open, but timetable management and delete actions now require an admin login.
+
+- default username: `gmm`
+- default password: `gmm`
+
+For a real public deployment, override these with environment variables:
+
+```bash
+export ADMIN_USERNAME="your-admin-name"
+export ADMIN_PASSWORD="choose-a-better-password"
+```
+
+## Tests
+
+Run the test suite with:
+
+```bash
+python3 -m unittest discover -s tests
+```

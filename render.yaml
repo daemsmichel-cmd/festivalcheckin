@@ -3,7 +3,7 @@ services:
     name: festival-finder
     runtime: python
     plan: starter
-    buildCommand: pip install -r requirements.txt
+    buildCommand: python -m pip install -r requirements.txt
     startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
     envVars:
       - key: SECRET_KEY

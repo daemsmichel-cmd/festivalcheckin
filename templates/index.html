@@ -140,7 +140,7 @@
                                                 <h4>{{ stage["stage_name_display"] }}</h4>
                                             </div>
                                             <p class="stage-card__meta">{{ stage["festival_name"] }}</p>
-                                            <p class="stage-card__meta">{{ stage["time_range"] }} · {{ stage["band_count"] }} bands · {{ stage["attendee_count"] }} crowd check-ins</p>
+                                            <p class="stage-card__meta">{{ stage["time_range"] }} · {{ stage["band_count"] }} bands · {{ stage["attendee_count"] }} crowd check-ins · {{ stage["favorite_count"] }} favorites</p>
                                         </div>
 
                                         <form method="post" action="{{ url_for('delete_stage') }}">
@@ -212,7 +212,7 @@
                                             <div class="schedule-lane">
                                             {% for band in stage["bands"] %}
                                                 <a
-                                                    class="schedule-band{% if band['attendee_count'] > 0 %} schedule-band--active{% endif %}"
+                                                    class="schedule-band{% if band['attendee_count'] > 0 or band['favorite_count'] > 0 %} schedule-band--active{% endif %}"
                                                     href="{{ url_for('band_detail', band_id=band['id']) }}"
                                                     style="left: {{ band['left'] }}px; width: {{ band['width'] }}px;"
                                                 >
@@ -223,7 +223,7 @@
                                                             {% endif %}
                                                         </span>
                                                         <strong class="schedule-band__name">{{ band["band_name"] }}</strong>
-                                                        <span class="schedule-band__meta">{{ band["attendee_count"] }} in crowd</span>
+                                                        <span class="schedule-band__meta">{{ band["attendee_count"] }} in crowd · {{ band["favorite_count"] }} favorites</span>
                                                     </a>
                                                 {% endfor %}
                                             </div>

@@ -5,7 +5,7 @@ import io
 import os
 import sqlite3
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -29,10 +29,29 @@ ALLOWED_IMAGE_EXTENSIONS = {"gif", "jpeg", "jpg", "png", "webp"}
 ALLOWED_TIMETABLE_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS | {"pdf"}
 ALLOWED_IMPORT_EXTENSIONS = {"csv", "txt"}
 DEFAULT_BAND_DURATION_MINUTES = 60
+DEFAULT_SECRET_KEY = "change-this-secret"
+DEFAULT_ADMIN_USERNAME = "gmm"
+DEFAULT_ADMIN_PASSWORD = "gmm"
+INSECURE_SECRET_KEYS = {
+    DEFAULT_SECRET_KEY,
+    "replace-this-with-a-random-secret",
+    "replace-with-a-generated-secret",
+}
+INSECURE_ADMIN_PASSWORDS = {
+    DEFAULT_ADMIN_PASSWORD,
+    "replace-this-with-a-strong-password",
+    "replace-with-a-strong-password",
+}
 TIMELINE_PIXELS_PER_MINUTE = 3
 FESTIVAL_DAY_START_MINUTES = 10 * 60 + 30
 FESTIVAL_DAY_END_MINUTES = 28 * 60
 FESTIVAL_DAY_OVERNIGHT_CUTOFF_MINUTES = 4 * 60
+PUBLIC_DEPLOYMENT_ENV_VARS = (
+    "RAILWAY_ENVIRONMENT_NAME",
+    "RAILWAY_SERVICE_ID",
+    "RAILWAY_DEPLOYMENT_ID",
+)
+PRODUCTION_ENV_VALUES = {"prod", "production"}
 
 
 def resolve_local_ssl_context(root_path: str | Path) -> tuple[str, str] | None:
@@ -57,6 +76,35 @@ def resolve_local_ssl_context(root_path: str | Path) -> tuple[str, str] | None:
         "HTTPS was requested, but the development certificate files were not found. "
         "Run scripts/generate_dev_cert.sh first or set SSL_CERT_PATH and SSL_KEY_PATH."
     )
+
+
+def is_public_deployment() -> bool:
+    app_env = os.environ.get("APP_ENV", "").strip().lower()
+    flask_env = os.environ.get("FLASK_ENV", "").strip().lower()
+    return (
+        any(os.environ.get(name) for name in PUBLIC_DEPLOYMENT_ENV_VARS)
+        or os.environ.get("RENDER") == "true"
+        or app_env in PRODUCTION_ENV_VALUES
+        or flask_env in PRODUCTION_ENV_VALUES
+    )
+
+
+def validate_deployment_config(app: Flask) -> None:
+    if app.config["TESTING"] or not is_public_deployment():
+        return
+
+    defaulted_secrets = []
+    if str(app.config["SECRET_KEY"]).strip() in INSECURE_SECRET_KEYS:
+        defaulted_secrets.append("SECRET_KEY")
+    if str(app.config["ADMIN_PASSWORD"]).strip() in INSECURE_ADMIN_PASSWORDS:
+        defaulted_secrets.append("ADMIN_PASSWORD")
+
+    if defaulted_secrets:
+        names = ", ".join(defaulted_secrets)
+        raise RuntimeError(
+            f"Public deployment requires non-default values for: {names}. "
+            "Set these in the Railway service Variables tab before deploying."
+        )
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -85,19 +133,23 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.config.from_mapping(
         SECRET_KEY=test_config.get("SECRET_KEY")
         or os.environ.get("SECRET_KEY")
-        or "change-this-secret",
+        or DEFAULT_SECRET_KEY,
         DATABASE=str(database_path),
         UPLOAD_ROOT=str(upload_root),
         MAX_CONTENT_LENGTH=max_upload_mb * 1024 * 1024,
         ADMIN_USERNAME=test_config.get("ADMIN_USERNAME")
         or os.environ.get("ADMIN_USERNAME")
-        or "gmm",
+        or DEFAULT_ADMIN_USERNAME,
         ADMIN_PASSWORD=test_config.get("ADMIN_PASSWORD")
         or os.environ.get("ADMIN_PASSWORD")
-        or "gmm",
+        or DEFAULT_ADMIN_PASSWORD,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=is_public_deployment(),
         TESTING=bool(test_config.get("TESTING", False)),
     )
     app.config.update(test_config)
+    validate_deployment_config(app)
 
     Path(app.config["DATABASE"]).parent.mkdir(parents=True, exist_ok=True)
     Path(app.config["UPLOAD_ROOT"]).mkdir(parents=True, exist_ok=True)
@@ -121,8 +173,69 @@ def create_app(test_config: dict | None = None) -> Flask:
         db.execute("PRAGMA foreign_keys = ON")
         with app.open_resource("schema.sql") as schema_file:
             db.executescript(schema_file.read().decode("utf-8"))
+        migrate_attendees_schema(db)
         db.commit()
         db.close()
+
+    def migrate_attendees_schema(db: sqlite3.Connection) -> None:
+        attendee_columns = db.execute("PRAGMA table_info(attendees)").fetchall()
+        if not attendee_columns:
+            return
+
+        attendee_column_map = {column[1]: column for column in attendee_columns}
+        nullable_columns = ("display_name", "latitude", "longitude", "pov_image", "side_image")
+        requires_migration = any(
+            attendee_column_map.get(column_name, (None, None, None, None, 0))[3]
+            for column_name in nullable_columns
+        )
+        if not requires_migration:
+            return
+
+        db.execute("ALTER TABLE attendees RENAME TO attendees_legacy")
+        db.execute(
+            """
+            CREATE TABLE attendees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                band_id INTEGER NOT NULL,
+                display_name TEXT,
+                latitude REAL,
+                longitude REAL,
+                note TEXT,
+                pov_image TEXT,
+                side_image TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (band_id) REFERENCES bands (id) ON DELETE CASCADE
+            )
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO attendees (
+                id,
+                band_id,
+                display_name,
+                latitude,
+                longitude,
+                note,
+                pov_image,
+                side_image,
+                created_at
+            )
+            SELECT
+                id,
+                band_id,
+                display_name,
+                latitude,
+                longitude,
+                note,
+                pov_image,
+                side_image,
+                created_at
+            FROM attendees_legacy
+            """
+        )
+        db.execute("DROP TABLE attendees_legacy")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_attendees_band_id ON attendees (band_id)")
 
     def is_admin_session() -> bool:
         return bool(session.get("is_admin"))
@@ -137,13 +250,31 @@ def create_app(test_config: dict | None = None) -> Flask:
                 continue
         return normalized_ids
 
+    def get_owned_favorite_ids() -> set[int]:
+        owned_ids = session.get("owned_favorite_ids", [])
+        normalized_ids = set()
+        for raw_id in owned_ids:
+            try:
+                normalized_ids.add(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+        return normalized_ids
+
     def session_owns_attendee(attendee_id: int) -> bool:
         return attendee_id in get_owned_attendee_ids()
+
+    def session_owns_favorite(favorite_id: int) -> bool:
+        return favorite_id in get_owned_favorite_ids()
 
     def remember_owned_attendee(attendee_id: int) -> None:
         owned_ids = get_owned_attendee_ids()
         owned_ids.add(attendee_id)
         session["owned_attendee_ids"] = sorted(owned_ids)
+
+    def remember_owned_favorite(favorite_id: int) -> None:
+        owned_ids = get_owned_favorite_ids()
+        owned_ids.add(favorite_id)
+        session["owned_favorite_ids"] = sorted(owned_ids)
 
     def forget_owned_attendee(attendee_id: int) -> None:
         owned_ids = get_owned_attendee_ids()
@@ -153,8 +284,19 @@ def create_app(test_config: dict | None = None) -> Flask:
         owned_ids.remove(attendee_id)
         session["owned_attendee_ids"] = sorted(owned_ids)
 
+    def forget_owned_favorite(favorite_id: int) -> None:
+        owned_ids = get_owned_favorite_ids()
+        if favorite_id not in owned_ids:
+            return
+
+        owned_ids.remove(favorite_id)
+        session["owned_favorite_ids"] = sorted(owned_ids)
+
     def can_manage_attendee(attendee_id: int) -> bool:
         return is_admin_session() or session_owns_attendee(attendee_id)
+
+    def can_manage_favorite(favorite_id: int) -> bool:
+        return is_admin_session() or session_owns_favorite(favorite_id)
 
     def sanitize_next_path(raw_value: str | None, fallback: str) -> str:
         if raw_value is None:
@@ -194,9 +336,11 @@ def create_app(test_config: dict | None = None) -> Flask:
             """
             SELECT
                 b.*,
-                COUNT(a.id) AS attendee_count
+                COUNT(DISTINCT a.id) AS attendee_count,
+                COUNT(DISTINCT f.id) AS favorite_count
             FROM bands b
             LEFT JOIN attendees a ON a.band_id = b.id
+            LEFT JOIN favorites f ON f.band_id = b.id
             WHERE b.id = ?
             GROUP BY b.id
             """,
@@ -220,6 +364,10 @@ def create_app(test_config: dict | None = None) -> Flask:
             return False
         extension = path.rsplit(".", 1)[1].lower()
         return extension in ALLOWED_IMAGE_EXTENSIONS
+
+    def attendee_display_name(value: str | None) -> str:
+        cleaned = (value or "").strip()
+        return cleaned or "Anonymous"
 
     def save_upload(file_storage, folder: str, allowed_extensions: set[str]) -> str | None:
         if file_storage is None or not file_storage.filename:
@@ -258,7 +406,7 @@ def create_app(test_config: dict | None = None) -> Flask:
 
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
             try:
-                return datetime.strptime(value, fmt).replace(tzinfo=UTC)
+                return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
         return None
@@ -315,6 +463,37 @@ def create_app(test_config: dict | None = None) -> Flask:
         if attendee is None:
             abort(404)
         return attendee
+
+    def get_favorite_or_404(band_id: int, favorite_id: int) -> sqlite3.Row:
+        favorite = get_db().execute(
+            """
+            SELECT *
+            FROM favorites
+            WHERE id = ? AND band_id = ?
+            """,
+            (favorite_id, band_id),
+        ).fetchone()
+        if favorite is None:
+            abort(404)
+        return favorite
+
+    def get_owned_favorite_for_band(band_id: int) -> sqlite3.Row | None:
+        owned_favorite_ids = sorted(get_owned_favorite_ids())
+        if not owned_favorite_ids:
+            return None
+
+        placeholders = ",".join("?" for _ in owned_favorite_ids)
+        return get_db().execute(
+            f"""
+            SELECT *
+            FROM favorites
+            WHERE band_id = ?
+              AND id IN ({placeholders})
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            [band_id, *owned_favorite_ids],
+        ).fetchone()
 
     def parse_delimited_import(file_storage) -> list[list[str]]:
         if file_storage is None or not file_storage.filename:
@@ -429,23 +608,34 @@ def create_app(test_config: dict | None = None) -> Flask:
         db.commit()
 
     def build_attendee_payload(attendee: sqlite3.Row) -> dict:
-        location = f"{attendee['latitude']},{attendee['longitude']}"
+        has_location = attendee["latitude"] is not None and attendee["longitude"] is not None
+        location = f"{attendee['latitude']},{attendee['longitude']}" if has_location else None
         return {
             "id": attendee["id"],
-            "display_name": attendee["display_name"],
+            "display_name": attendee_display_name(attendee["display_name"]),
             "latitude": attendee["latitude"],
             "longitude": attendee["longitude"],
             "note": attendee["note"] or "",
             "created_at": attendee["created_at"],
-            "pov_image_url": url_for("uploaded_file", filename=attendee["pov_image"]),
-            "side_image_url": url_for("uploaded_file", filename=attendee["side_image"]),
+            "pov_image_url": (
+                url_for("uploaded_file", filename=attendee["pov_image"])
+                if attendee["pov_image"]
+                else None
+            ),
+            "side_image_url": (
+                url_for("uploaded_file", filename=attendee["side_image"])
+                if attendee["side_image"]
+                else None
+            ),
             "map_url": (
                 "https://www.openstreetmap.org/"
                 f"?mlat={attendee['latitude']}&mlon={attendee['longitude']}"
                 f"#map=18/{attendee['latitude']}/{attendee['longitude']}"
-            ),
-            "directions_url": f"https://maps.apple.com/?daddr={location}&dirflg=w",
-            "ios_app_directions_url": f"maps://?daddr={location}&dirflg=w",
+            )
+            if has_location
+            else None,
+            "directions_url": f"https://maps.apple.com/?daddr={location}&dirflg=w" if has_location else None,
+            "ios_app_directions_url": f"maps://?daddr={location}&dirflg=w" if has_location else None,
         }
 
     def build_schedule_days(bands: list[sqlite3.Row]) -> list[dict]:
@@ -515,6 +705,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                         "band_name": band["band_name"],
                         "festival_name": band["festival_name"],
                         "attendee_count": band["attendee_count"],
+                        "favorite_count": band["favorite_count"],
                         "start_time": band["start_time"],
                         "end_time": band["end_time"],
                         "has_timetable": bool(band["timetable_file"]),
@@ -579,12 +770,14 @@ def create_app(test_config: dict | None = None) -> Flask:
                     "stage_name_display": stage_name_display,
                     "band_count": 0,
                     "attendee_count": 0,
+                    "favorite_count": 0,
                     "sort_start": start_minute,
                     "sort_end": end_minute,
                 },
             )
             entry["band_count"] += 1
             entry["attendee_count"] += band["attendee_count"]
+            entry["favorite_count"] += band["favorite_count"]
             entry["sort_start"] = min(entry["sort_start"], start_minute)
             entry["sort_end"] = max(entry["sort_end"], end_minute)
 
@@ -628,6 +821,8 @@ def create_app(test_config: dict | None = None) -> Flask:
             "is_admin": is_admin_session(),
             "admin_username": session.get("admin_username", ""),
             "can_manage_attendee": can_manage_attendee,
+            "can_manage_favorite": can_manage_favorite,
+            "attendee_display_name": attendee_display_name,
             "is_image_file": is_image_file,
             "openstreetmap_place_url": openstreetmap_place_url,
             "apple_maps_directions_url": apple_maps_directions_url,
@@ -653,7 +848,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             return "just now"
 
         elapsed_seconds = max(
-            int((datetime.now(UTC) - timestamp).total_seconds()),
+            int((datetime.now(timezone.utc) - timestamp).total_seconds()),
             0,
         )
         if elapsed_seconds < 60:
@@ -720,14 +915,17 @@ def create_app(test_config: dict | None = None) -> Flask:
             """
             SELECT
                 b.*,
-                COUNT(a.id) AS attendee_count
+                COUNT(DISTINCT a.id) AS attendee_count,
+                COUNT(DISTINCT f.id) AS favorite_count
             FROM bands b
             LEFT JOIN attendees a ON a.band_id = b.id
+            LEFT JOIN favorites f ON f.band_id = b.id
             GROUP BY b.id
             ORDER BY b.performance_date ASC, b.start_time ASC, b.created_at DESC
             """
         ).fetchall()
         total_attendees = db.execute("SELECT COUNT(*) AS count FROM attendees").fetchone()["count"]
+        total_favorites = db.execute("SELECT COUNT(*) AS count FROM favorites").fetchone()["count"]
         schedule_days = build_schedule_days(bands)
         stage_groups = build_stage_groups(bands)
         active_tab = request.args.get("tab", "overview").strip().lower()
@@ -743,6 +941,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             stage_groups=stage_groups,
             total_bands=len(bands),
             total_attendees=total_attendees,
+            total_favorites=total_favorites,
         )
 
     @app.post("/bands")
@@ -974,53 +1173,80 @@ def create_app(test_config: dict | None = None) -> Flask:
             """,
             (band_id,),
         ).fetchall()
+        favorites = get_db().execute(
+            """
+            SELECT *
+            FROM favorites
+            WHERE band_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (band_id,),
+        ).fetchall()
         return render_template(
             "band_detail.html",
             band=band,
             attendees=attendees,
+            favorites=favorites,
         )
+
+    @app.post("/bands/<int:band_id>/favorites")
+    def create_favorite(band_id: int):
+        band = get_band_or_404(band_id)
+        display_name = request.form.get("display_name", "").strip()
+        if not display_name:
+            flash("Name is required to favorite a band.", "error")
+            return redirect(url_for("band_detail", band_id=band["id"]))
+
+        existing_owned_favorite = get_owned_favorite_for_band(band["id"])
+        if existing_owned_favorite is not None:
+            flash(f"You already favorited {band['band_name']} on this device.", "error")
+            return redirect(url_for("band_detail", band_id=band["id"]))
+
+        db = get_db()
+        db.execute(
+            """
+            INSERT INTO favorites (
+                band_id,
+                display_name
+            ) VALUES (?, ?)
+            """,
+            (band["id"], display_name),
+        )
+        favorite_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        remember_owned_favorite(favorite_id)
+        flash(f"{display_name} favorited {band['band_name']}.", "success")
+        return redirect(url_for("band_detail", band_id=band["id"]))
 
     @app.post("/bands/<int:band_id>/attendees")
     def create_attendee(band_id: int):
         band = get_band_or_404(band_id)
-        display_name = request.form.get("display_name", "").strip()
-        note = request.form.get("note", "").strip()
+        display_name = request.form.get("display_name", "").strip() or None
+        note = request.form.get("note", "").strip() or None
         latitude_raw = request.form.get("latitude", "").strip()
         longitude_raw = request.form.get("longitude", "").strip()
 
-        errors = []
-        if not display_name:
-            errors.append("Display name is required.")
-
-        if not latitude_raw or not longitude_raw:
-            errors.append("Use my position before checking in.")
-            latitude = None
-            longitude = None
-        else:
+        latitude = None
+        longitude = None
+        if latitude_raw and longitude_raw:
             try:
                 latitude = parse_coordinate(latitude_raw, -90.0, 90.0, "Latitude")
                 longitude = parse_coordinate(longitude_raw, -180.0, 180.0, "Longitude")
             except ValueError as exc:
-                errors.append(str(exc))
-                latitude = None
-                longitude = None
+                flash(str(exc), "error")
+                return redirect(url_for("band_detail", band_id=band["id"]))
 
         pov_image = request.files.get("pov_image")
         side_image = request.files.get("side_image")
-        if pov_image is None or not pov_image.filename:
-            errors.append("POV photo is required.")
-        if side_image is None or not side_image.filename:
-            errors.append("Side photo is required.")
 
-        if errors:
-            for error in errors:
-                flash(error, "error")
-            return redirect(url_for("band_detail", band_id=band["id"]))
-
+        pov_path = None
+        side_path = None
         try:
             pov_path = save_upload(pov_image, "attendees", ALLOWED_IMAGE_EXTENSIONS)
             side_path = save_upload(side_image, "attendees", ALLOWED_IMAGE_EXTENSIONS)
         except ValueError as exc:
+            delete_uploaded_file(pov_path)
+            delete_uploaded_file(side_path)
             flash(str(exc), "error")
             return redirect(url_for("band_detail", band_id=band["id"]))
 
@@ -1050,7 +1276,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         attendee_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.commit()
         remember_owned_attendee(attendee_id)
-        flash(f"{display_name} checked in for {band['band_name']}.", "success")
+        flash(f"{attendee_display_name(display_name)} checked in for {band['band_name']}.", "success")
         return redirect(url_for("band_detail", band_id=band["id"]))
 
     @app.post("/bands/<int:band_id>/attendees/<int:attendee_id>/delete")
@@ -1070,7 +1296,27 @@ def create_app(test_config: dict | None = None) -> Flask:
         delete_uploaded_file(attendee["side_image"])
         forget_owned_attendee(attendee["id"])
 
-        flash(f"{attendee['display_name']} left the crowd for {band['band_name']}.", "success")
+        flash(
+            f"{attendee_display_name(attendee['display_name'])} left the crowd for {band['band_name']}.",
+            "success",
+        )
+        return redirect(url_for("band_detail", band_id=band["id"]))
+
+    @app.post("/bands/<int:band_id>/favorites/<int:favorite_id>/delete")
+    def delete_favorite(band_id: int, favorite_id: int):
+        band = get_band_or_404(band_id)
+        favorite = get_favorite_or_404(band_id, favorite_id)
+
+        if not can_manage_favorite(favorite["id"]):
+            flash("You can only remove your own favorite.", "error")
+            return redirect(url_for("band_detail", band_id=band["id"]))
+
+        db = get_db()
+        db.execute("DELETE FROM favorites WHERE id = ?", (favorite["id"],))
+        db.commit()
+        forget_owned_favorite(favorite["id"])
+
+        flash(f"{favorite['display_name']} removed {band['band_name']} from favorites.", "success")
         return redirect(url_for("band_detail", band_id=band["id"]))
 
     @app.get("/api/bands/<int:band_id>/attendees")

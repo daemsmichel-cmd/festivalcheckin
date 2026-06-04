@@ -12,18 +12,22 @@ The current implementation uses simple name-based check-ins for each band page. 
 
 ## Tech stack
 
-- Python
+- Python 3.12.9
 - Flask
 - SQLite
+- Gunicorn
+- Docker
 - local file uploads for timetable files and crowd photos
 - OpenStreetMap and Apple Maps links for attendee locations
 
 ## Run locally
 
+Use Python 3.12.9 locally. The pinned version lives in [`.python-version`](.python-version) so GitHub Actions and Railway build the same runtime.
+
 1. Create a virtual environment:
 
    ```bash
-   python3 -m venv .venv
+   python -m venv .venv
    source .venv/bin/activate
    ```
 
@@ -36,7 +40,7 @@ The current implementation uses simple name-based check-ins for each band page. 
 3. Start the app:
 
    ```bash
-   python3 app.py
+   python app.py
    ```
 
 4. Open `http://127.0.0.1:5001`
@@ -63,7 +67,7 @@ You can run the local server over HTTPS:
 2. Start the app with local HTTPS enabled:
 
    ```bash
-   LOCAL_HTTPS=1 python3 app.py
+   LOCAL_HTTPS=1 python app.py
    ```
 
 3. Open one of these URLs:
@@ -83,22 +87,49 @@ Important for iPhone testing: Safari only allows browser geolocation on secure o
 
 - `https://your-app.up.railway.app` should work
 - `http://192.168.x.x:5001` from your phone will be blocked
-- `LOCAL_HTTPS=1 python3 app.py` can work for local HTTPS, but the certificate must be trusted on the phone
+- `LOCAL_HTTPS=1 python app.py` can work for local HTTPS, but the certificate must be trusted on the phone
 - Railway, Render, or an HTTPS tunnel is still the cleanest option for phone testing
 
 ## Deploy with GitHub + Railway
 
 GitHub should hold the source code. Railway should run the server.
 
-1. Create a new GitHub repository and push this project to it.
-2. In Railway, choose **New Project** -> **Deploy from GitHub repo**.
-3. Select this repository.
-4. Railway will detect the checked-in [`railway.json`](railway.json) and use Gunicorn with the `/health` endpoint.
-5. In the service **Variables** tab, set `SECRET_KEY`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD`.
-6. Generate a public domain in the service **Settings** -> **Networking** section.
-7. Attach a volume to the service and mount it somewhere like `/data`.
+1. Create a new GitHub repository and push this project to it:
+
+   ```bash
+   git add .
+   git commit -m "Prepare Festival Finder for deployment"
+   git branch -M main
+   git remote add origin git@github.com:YOUR_USER/festival-finder.git
+   git push -u origin main
+   ```
+
+2. GitHub Actions will run the checked-in [CI workflow](.github/workflows/ci.yml) on pushes and pull requests.
+3. In Railway, choose **New Project** -> **Deploy from GitHub repo**.
+4. Select this repository.
+5. Railway will detect the checked-in [`railway.json`](railway.json), build the included [`Dockerfile`](Dockerfile), start Gunicorn, and health-check `/health`.
+6. In the service **Variables** tab, set:
+
+   ```bash
+   SECRET_KEY=replace-with-a-generated-secret
+   ADMIN_USERNAME=admin
+   ADMIN_PASSWORD=replace-with-a-strong-password
+   ```
+
+   You can generate a `SECRET_KEY` locally with:
+
+   ```bash
+   python -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+
+7. Attach a Railway volume to the service and mount it at `/data`.
+8. Generate a public domain in the service **Settings** -> **Networking** section.
+
+If an earlier Railway service has a custom **Build Command** set to `pip install -r requirements.txt`, clear it or redeploy after pushing this repo. The checked-in Railway config sets `buildCommand` to `null` so the Dockerfile controls dependency installation with `python -m pip`.
 
 Railway automatically exposes the `RAILWAY_VOLUME_MOUNT_PATH` environment variable for attached volumes. This app now uses that mount path automatically for the SQLite database and uploads when `DATABASE_PATH` and `UPLOAD_ROOT` are not set explicitly.
+
+The app refuses to boot in public deployments if `SECRET_KEY` or `ADMIN_PASSWORD` are still using development defaults. Set the variables before redeploying if Railway shows that startup error.
 
 ### Important Railway note
 
@@ -106,7 +137,7 @@ This app stores uploads and SQLite data on disk. Railway deployments are ephemer
 
 Without a volume, uploaded timetable files, POV photos, side photos, and the SQLite database will disappear after redeploys or restarts.
 
-The included [`.env.example`](.env.example) file helps Railway suggest the required variables during setup.
+The included [`.env.example`](.env.example) file documents the variables you can paste into Railway's raw variable editor.
 
 If you prefer explicit paths instead of Railway's automatic volume detection, set:
 
@@ -138,5 +169,5 @@ export ADMIN_PASSWORD="choose-a-better-password"
 Run the test suite with:
 
 ```bash
-python3 -m unittest discover -s tests
+python -m unittest discover -s tests
 ```

@@ -91,7 +91,8 @@ textarea {
 .helper-text,
 .attendee-card__header p,
 .band-card p,
-.detail-band__meta {
+.detail-band__meta,
+.brand__device-name {
     color: var(--muted);
 }
 
@@ -100,8 +101,13 @@ textarea {
 .helper-text,
 .attendee-card__header p,
 .band-card p,
-.detail-band__meta {
+.detail-band__meta,
+.brand__device-name {
     margin: 0;
+}
+
+.brand__device-name {
+    font-size: 0.88rem;
 }
 
 .header-link,
@@ -752,6 +758,38 @@ textarea {
     font-size: 0.94rem;
 }
 
+.favorite-list {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.favorite-card {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    align-items: center;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-strong);
+}
+
+.favorite-card__copy {
+    display: grid;
+    gap: 4px;
+}
+
+.favorite-card__meta {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.84rem;
+}
+
+.attendee-swipe-hint {
+    margin-bottom: 12px;
+}
+
 .attendee-card__title {
     display: grid;
     gap: 8px;
@@ -794,10 +832,25 @@ textarea {
     border: 1px solid var(--border);
 }
 
+.photo-frame--empty {
+    display: grid;
+    grid-template-rows: 1fr auto;
+    min-height: 220px;
+}
+
 .photo-frame img {
     width: 100%;
     aspect-ratio: 4 / 3;
     object-fit: cover;
+}
+
+.photo-frame__empty-copy {
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    color: var(--muted);
+    text-align: center;
+    font-size: 0.9rem;
 }
 
 .photo-frame figcaption {
@@ -897,5 +950,21 @@ textarea {
     .inline-actions,
     .section-header {
         flex-direction: column;
+    }
+
+    .attendee-grid--swipe-mobile {
+        display: grid;
+        grid-auto-flow: column;
+        grid-auto-columns: minmax(85%, 320px);
+        gap: 12px;
+        overflow-x: auto;
+        padding-bottom: 4px;
+        scroll-snap-type: x proximity;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .attendee-grid--swipe-mobile .attendee-card,
+    .attendee-grid--swipe-mobile .empty-state {
+        scroll-snap-align: start;
     }
 }
